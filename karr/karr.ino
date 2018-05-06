@@ -55,7 +55,7 @@ void updateVoltages() {
 
 // -------------------------------------------------------------------------------- Potentiometer + Centimeter -> Newton
 #define TRIM_TO 5
-const float POT_UREF = 5;
+const float POT_UREF = 3.3;
 double currentForce = 0;
 float updateForce() {
   double force = TRIM_TO * ((analogVoltage(A_POT) / POT_UREF) / force_trim);
@@ -67,12 +67,13 @@ void updateFTRIM() {
 }
 
 // -------------------------------------------------------------------------------- PID
-#define PID_kP 2.0
-#define PID_kI 0.05
-#define PID_kD 0.25
+#define PID_kP 20
+#define PID_kI 0.08
+#define PID_kD 0.65 //
 double pid_goal = 1;
 double pwm_out = 0;
 void output() {
+  // if (currentForce < 1) { pwm_out = 0; }
   digitalWrite(O_FWD, pwm_out <= 0 ? HIGH : LOW);
   digitalWrite(O_RWD, pwm_out >= 0 ? HIGH : LOW);
   analogWrite(pwm_out < 0 ? PWM_R : PWM_F, pwm_out);
@@ -80,7 +81,7 @@ void output() {
 PID pid(&currentForce, &pwm_out, &pid_goal, PID_kP, PID_kI, PID_kD, REVERSE);
 
 // -------------------------------------------------------------------------------- Frequency measurement
-#define MIN_FREQ 0.5
+#define MIN_FREQ 2.0
 const long maxdiff = MIN_FREQ * 1000000;
 float lastFreq = 0;
 volatile unsigned short pulses = 0;
@@ -178,7 +179,7 @@ void loop() {
   updateControl();
   updateForce();
   pid.Compute();
-  //output();
+  output();
   updateVoltages();
   
   SOutput out[] = {
@@ -194,5 +195,4 @@ void loop() {
     {F("CRTL"), control}
   };
   serialOut(out, 6);
-  delay(100);
 }
