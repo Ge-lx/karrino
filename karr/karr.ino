@@ -1,3 +1,5 @@
+#include <PID_v1.h>
+
 #include <EEPROM.h>
 #include "SOutput.h"
 
@@ -5,40 +7,28 @@
 #define D_HALL 2 // Hall sensor
 #define D_BRK 3 // Break button
 #define D_CTL 4 // Control button
+#define D_FC 5 // Forward current leak ?
+#define D_RC 6 // Reverse current leak ?
 // ANALOG IN
 const float V_CONV = 5 / 1024.0; // 1024bits over 5V
-float analogVoltage(byte pin) {
+double analogVoltage(byte pin) {
   return analogRead(pin) * V_CONV;
 }
 #define A_12V 0 // 12V Volatge
 #define A_24V 1 // 24V Voltage
 #define A_POT 2 // Potentiometer
 // OUTPUT
-#define O_BUZZ 3
-#define PWM_F 10
-#define PWM_R 11
+#define O_BUZZ 5 // Buzzer
+#define O_FWD 8 // Enable forward PWM
+#define O_RWD 9 // Enable reverse PWM
+#define PWM_F 10 // Forward PWM
+#define PWM_R 11 // Reverse PWM
 
-// EEPROM
+// --------------------------------EEPROM
 #define F_TRIM 0 // Address for force trim
 float force_trim;
 
-void setup()
-{
-  EEPROM.get(F_TRIM, force_trim);
-  Serial.begin(9600); // Try to establish serial connection
-
-  //Break button
-  pinMode(D_BRK, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(D_BRK), ISR_breakButton, FALLING);
-  //Control button
-  pinMode(D_CTL, INPUT_PULLUP);
-
-  // Frequency measurement
-  pinMode(D_HALL, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(D_HALL), ISR_hallSensor, FALLING);
-}
-
-// ------------------------------------------------ V -> % conversion
+// -------------------------------------------------------------------------------- V -> % conversion
 #define RATIO_12V 3 // Voltage divider trim
 #define RATIO_24V 6
 #define euler 2.71828182846
@@ -63,18 +53,33 @@ void updateVoltages() {
   }
 }
 
-// ------------------------------------------------ Potentiometer + Centimeter -> Newton
+// -------------------------------------------------------------------------------- Potentiometer + Centimeter -> Newton
 #define TRIM_TO 5
 const float POT_UREF = 5;
-float currentForce() {
-  return TRIM_TO * ((analogVoltage(A_POT) / POT_UREF) / force_trim);
+double currentForce = 0;
+float updateForce() {
+  double force = TRIM_TO * ((analogVoltage(A_POT) / POT_UREF) / force_trim);
+  currentForce = force < 0.2 ? 0 : force;
 }
 void updateFTRIM() {
   force_trim = (analogVoltage(A_POT) / POT_UREF);
   EEPROM.put(F_TRIM, force_trim);
 }
 
-// ------------------------------------------------ Frequency measurement
+// -------------------------------------------------------------------------------- PID
+#define PID_kP 2.0
+#define PID_kI 0.05
+#define PID_kD 0.25
+double pid_goal = 1;
+double pwm_out = 0;
+void output() {
+  digitalWrite(O_FWD, pwm_out <= 0 ? HIGH : LOW);
+  digitalWrite(O_RWD, pwm_out >= 0 ? HIGH : LOW);
+  analogWrite(pwm_out < 0 ? PWM_R : PWM_F, pwm_out);
+}
+PID pid(&currentForce, &pwm_out, &pid_goal, PID_kP, PID_kI, PID_kD, REVERSE);
+
+// -------------------------------------------------------------------------------- Frequency measurement
 #define MIN_FREQ 0.5
 const long maxdiff = MIN_FREQ * 1000000;
 float lastFreq = 0;
@@ -104,7 +109,7 @@ float freq() {
   return f;
 }
 
-// ------------------------------------------------ Break button
+// -------------------------------------------------------------------------------- Break button
 #define DEBOUNCE_DELAY 50 //millis
 volatile unsigned long lastBreak = 0;
 volatile boolean breaking = false;
@@ -118,7 +123,7 @@ void updateBreak() {
   }
 }
 
-// ------------------------------------------------ Control button
+// -------------------------------------------------------------------------------- Control button
 #define CONTROL_DEBOUNCE 50 //millis
 unsigned long lastControl = 0;
 boolean control = false;
@@ -144,22 +149,50 @@ void serialOut(SOutput out[], short size) {
   Serial.println("");
 }
 
+void setup()
+{
+  EEPROM.get(F_TRIM, force_trim);
+  Serial.begin(9600); // Try to establish serial connection
+
+  pinMode(O_BUZZ, OUTPUT);
+  pinMode(O_FWD, OUTPUT);
+  pinMode(O_RWD, OUTPUT);
+  pinMode(PWM_F, OUTPUT);
+  pinMode(PWM_R, OUTPUT);
+
+  //Break button
+  pinMode(D_BRK, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(D_BRK), ISR_breakButton, FALLING);
+  //Control button
+  pinMode(D_CTL, INPUT_PULLUP);
+
+  // Frequency measurement
+  pinMode(D_HALL, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(D_HALL), ISR_hallSensor, FALLING);
+
+  pid.SetMode(AUTOMATIC);
+}
+
 void loop() {
   updateBreak();
-  updateVoltages();
   updateControl();
+  updateForce();
+  pid.Compute();
+  //output();
+  updateVoltages();
   
   SOutput out[] = {
     {F("FREQ"), freq()},
-    {F("FORCE"), currentForce()},
-    {F("12V"), volt_12},
-    {F("24V"), volt_24},
-    {F("CHG_A"), chg_a},
-    {F("CHG_B"), chg_b},
+    {F("FORCE"), currentForce},
+    // {F("12V"), volt_12},
+    // {F("24V"), volt_24},
+    // {F("CHG_A"), chg_a},
+    // {F("CHG_B"), chg_b},
+    {F("PWN_OUT"), pwm_out},
     {F("FTRIM"), force_trim},
     {F("BREAK"), breaking},
     {F("CRTL"), control}
   };
-  serialOut(out, 9);
+  serialOut(out, 6);
   delay(100);
 }
