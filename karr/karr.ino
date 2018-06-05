@@ -6,27 +6,53 @@
 // DIGITAL IN
 #define D_HALL 2 // Hall sensor
 #define D_BRK 3 // Break button
-#define D_CTL 4 // Control button
-#define D_FC 5 // Forward current leak ?
-#define D_RC 6 // Reverse current leak ?
+#define D_CTL 5 // Control button
+#define D_FC 6 // Forward current leak ?
+#define D_RC 7 // Reverse current leak ?
 // ANALOG IN
 const float V_CONV = 5 / 1024.0; // 1024bits over 5V
 double analogVoltage(byte pin) {
   return analogRead(pin) * V_CONV;
 }
-#define A_12V 0 // 12V Volatge
+#define A_12V 0 // 12V Voltage
 #define A_24V 1 // 24V Voltage
 #define A_POT 2 // Potentiometer
 // OUTPUT
-#define O_BUZZ 5 // Buzzer
 #define O_FWD 8 // Enable forward PWM
 #define O_RWD 9 // Enable reverse PWM
-#define PWM_F 10 // Forward PWM
-#define PWM_R 11 // Reverse PWM
+#define PWM_F 11 // Forward PWM
+#define PWM_R 10 // Reverse PWM
 
 // --------------------------------EEPROM
 #define F_TRIM 0 // Address for force trim
 float force_trim;
+
+// -------------------------------------------------------------------------------- Frequency measurement
+#define MIN_FREQ 2.0
+const long maxdiff = MIN_FREQ * 1000000;
+float freq = 0;
+volatile unsigned short pulses = 0;
+volatile unsigned long firstPulse = 0;
+volatile unsigned long lastPulse = 0;
+void ISR_hallSensor() {
+  if (pulses == 0) {
+    firstPulse = micros();
+  } else {
+    lastPulse = micros();
+  }
+  pulses++;
+}
+void updateFreq() {
+  unsigned short lastpulses = pulses;
+  if (lastpulses > 1) {
+    noInterrupts();
+    pulses = 0;
+    freq = (lastpulses * (double) 1000000) / (lastPulse - firstPulse);
+    interrupts();
+  } else if (micros() - lastPulse > maxdiff) {
+    freq = 0;
+  }
+}
 
 // -------------------------------------------------------------------------------- V -> % conversion
 #define RATIO_12V 3 // Voltage divider trim
@@ -67,62 +93,35 @@ void updateFTRIM() {
 }
 
 // -------------------------------------------------------------------------------- PID
-#define PID_kP 20
-#define PID_kI 0.08
-#define PID_kD 0.65 //
-double pid_goal = 1;
-double pwm_out = 0;
+#define PID_kP 25.5
+#define PID_kI 0
+#define PID_kD 0.2
+#define FORCE_GOAL 1
+#define MAX_INT_ERROR 2
+double pid_goal = FORCE_GOAL;
+double pid_out = 0;
+double intError = 0;
+double last_error = 0;
+unsigned long lastCalcTime = millis();
+// void calcPID() {
+//   double error = currentForce - pid_goal; // Positive: too much force -> speed up
+//   double dt = (millis() - lastCalcTime);
+
+//   lastCalcTime = millis();
+//   intError += error * PID_kI * dt; 
+//   if (intError > MAX_INT_ERROR) intError = MAX_INT_ERROR;
+//   if (intError < -1* MAX_INT_ERROR) intError = -1 * MAX_INT_ERROR;
+
+//   double derivError = (error - last_error) / (double) dt;
+  
+
+//   pid_out = intError + (error * PID_kD + derivError * PID_kD) * PID_GAIN;
+//   pid_out = pid_out > 255 ? 255 : (pid_out < 0 ? 0 : 1) * pid_out;
+// }
 void output() {
-  // if (currentForce < 1) { pwm_out = 0; }
-  digitalWrite(O_FWD, pwm_out <= 0 ? HIGH : LOW);
-  digitalWrite(O_RWD, pwm_out >= 0 ? HIGH : LOW);
-  analogWrite(pwm_out < 0 ? PWM_R : PWM_F, pwm_out);
+  analogWrite(pid_out < 0 ? PWM_R : PWM_F, pid_out);
 }
-PID pid(&currentForce, &pwm_out, &pid_goal, PID_kP, PID_kI, PID_kD, REVERSE);
-
-// -------------------------------------------------------------------------------- Frequency measurement
-#define MIN_FREQ 2.0
-const long maxdiff = MIN_FREQ * 1000000;
-float lastFreq = 0;
-volatile unsigned short pulses = 0;
-volatile unsigned long firstPulse = 0;
-volatile unsigned long lastPulse = 0;
-void ISR_hallSensor() {
-  if (pulses == 0) {
-    firstPulse = micros();
-  } else {
-    lastPulse = micros();
-  }
-  pulses++;
-}
-float freq() {
-  unsigned short lastpulses = pulses;
-  float f = lastFreq;
-  if (lastpulses > 1) {
-    noInterrupts();
-    pulses = 0;
-    f = (lastpulses * (double) 1000000) / (lastPulse - firstPulse);
-    interrupts();
-    lastFreq = f;
-  } else if (micros() - lastPulse > maxdiff) {
-    lastFreq = 0;
-  }
-  return f;
-}
-
-// -------------------------------------------------------------------------------- Break button
-#define DEBOUNCE_DELAY 50 //millis
-volatile unsigned long lastBreak = 0;
-volatile boolean breaking = false;
-void ISR_breakButton() {
-  lastBreak = millis();
-  breaking = true;
-}
-void updateBreak() {
-  if (breaking && digitalRead(D_BRK) != LOW && millis() - lastBreak > DEBOUNCE_DELAY) {
-    breaking = false;
-  }
-}
+PID pid(&currentForce, &pid_out, &pid_goal, PID_kP, PID_kI, PID_kD, REVERSE);
 
 // -------------------------------------------------------------------------------- Control button
 #define CONTROL_DEBOUNCE 50 //millis
@@ -136,6 +135,24 @@ void updateControl() {
   }
   if (control && digitalRead(D_CTL) != LOW && millis() - lastControl > CONTROL_DEBOUNCE) {
     control = false;
+  }
+}
+
+// -------------------------------------------------------------------------------- Break button
+#define DEBOUNCE_DELAY 100 //millis
+volatile unsigned long lastBreak = 0;
+volatile double breakForce = 0;
+volatile boolean breaking = false;
+void ISR_breakButton() {
+  lastBreak = millis();
+  breaking = true;
+  breakForce = currentForce + 0.5;
+}
+void updateBreak() {
+  if ( breaking 
+    && (digitalRead(D_BRK) != LOW && millis() - lastBreak > DEBOUNCE_DELAY)
+    && currentForce > breakForce) {
+    breaking = false;
   }
 }
 
@@ -155,11 +172,15 @@ void setup()
   EEPROM.get(F_TRIM, force_trim);
   Serial.begin(9600); // Try to establish serial connection
 
-  pinMode(O_BUZZ, OUTPUT);
   pinMode(O_FWD, OUTPUT);
   pinMode(O_RWD, OUTPUT);
   pinMode(PWM_F, OUTPUT);
   pinMode(PWM_R, OUTPUT);
+  //setPWMfrequency(10, 15);
+  //setPWMfrequency(11, 15);
+
+  digitalWrite(O_RWD, HIGH);
+  digitalWrite(O_FWD, HIGH);
 
   //Break button
   pinMode(D_BRK, INPUT_PULLUP);
@@ -178,21 +199,23 @@ void loop() {
   updateBreak();
   updateControl();
   updateForce();
+  updateFreq();
+
+  //pid_goal = breaking ? 15 : FORCE_GOAL;
+  //calcPID();
   pid.Compute();
   output();
   updateVoltages();
   
   SOutput out[] = {
-    {F("FREQ"), freq()},
+    {F("FREQ"), freq},
     {F("FORCE"), currentForce},
-    // {F("12V"), volt_12},
-    // {F("24V"), volt_24},
-    // {F("CHG_A"), chg_a},
-    // {F("CHG_B"), chg_b},
-    {F("PWN_OUT"), pwm_out},
+    {F("PID_GOAL"), pid_goal},
+    {F("12V"), volt_12},
+    {F("24V"), volt_24},
+    {F("PID_OUT"), pid_out},
     {F("FTRIM"), force_trim},
-    {F("BREAK"), breaking},
-    {F("CRTL"), control}
+    {F("BREAK"), breaking ? 20 : 0},
   };
-  serialOut(out, 6);
+  serialOut(out, 8);
 }
